@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
 import connectDB from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
 import vaultRoutes from './routes/vaultRoutes.js';
@@ -10,6 +11,14 @@ import { authLimiter, vaultLimiter, globalLimiter } from './middleware/rateLimit
 
 // Load environment variables FIRST — before everything else
 dotenv.config();
+
+// ─── Startup Validation ───────────────────────────────────────────────────────
+const requiredEnv = ['MONGO_URI', 'JWT_SECRET', 'ENCRYPTION_KEY'];
+const missingEnv = requiredEnv.filter(key => !process.env[key]);
+if (missingEnv.length > 0) {
+    console.error(`❌ FATAL: Missing required environment variables: ${missingEnv.join(', ')}`);
+    process.exit(1); // Crash early, crash loudly
+}
 
 // Connect to MongoDB Atlas
 connectDB();
@@ -21,6 +30,9 @@ const PORT = process.env.PORT || 5000;
 app.set('trust proxy', 1);
 
 // ─── Middleware ────────────────────────────────────────────────────────────────
+
+// Secure HTTP headers
+app.use(helmet());
 
 // CORS: only allow requests from the React frontend
 app.use(

@@ -1,6 +1,6 @@
 import { validationResult } from 'express-validator';
 import Vault from '../models/Vault.js';
-import { encrypt, decrypt } from '../utils/encryption.js';
+import { encryptVault, decryptVault, decryptUserDEK, destroyDEK } from '../utils/encryption.js';
 
 // ─── @route  GET /api/vault ───────────────────────────────────────────────────
 // @desc   Get all vault entries for the logged-in user
@@ -11,17 +11,24 @@ export const getEntries = async (req, res, next) => {
             createdAt: -1,
         });
 
+        // Fetch and decrypt the user's DEK into memory
+        const userDek = decryptUserDEK(req.user.encryptedDek);
+
         // Decrypt each password before sending to the client
         const decryptedEntries = entries.map((entry) => {
             const obj = entry.toObject();
             try {
-                obj.password = decrypt(entry.encryptedPassword);
-            } catch {
+                obj.password = decryptVault(entry.encryptedPassword, userDek);
+            } catch (err) {
+                console.error("Decryption failed for entry", entry._id, err);
                 obj.password = ''; // Fail safely — don't crash the whole list
             }
             delete obj.encryptedPassword; // Never expose raw ciphertext to frontend
             return obj;
         });
+
+        // Immediately destroy the DEK buffer
+        destroyDEK(userDek);
 
         res.status(200).json({ success: true, data: decryptedEntries });
     } catch (error) {
@@ -42,8 +49,14 @@ export const createEntry = async (req, res, next) => {
 
         const { siteName, siteUrl, username, password, notes, category } = req.body;
 
-        // Encrypt BEFORE saving — zero-knowledge principle
-        const encryptedPassword = encrypt(password);
+        // Decrypt user DEK into memory
+        const userDek = decryptUserDEK(req.user.encryptedDek);
+
+        // Encrypt BEFORE saving
+        const encryptedPassword = encryptVault(password, userDek);
+
+        // Destroy DEK buffer
+        destroyDEK(userDek);
 
         const entry = await Vault.create({
             user: req.user._id,
@@ -101,15 +114,22 @@ export const updateEntry = async (req, res, next) => {
         if (isFavorite !== undefined) entry.isFavorite = isFavorite;
 
         // Only re-encrypt if a new password was actually sent
+        let userDek = null;
+        if (password || !password) { // We might need DEK to decrypt the current password if not updated
+            userDek = decryptUserDEK(req.user.encryptedDek);
+        }
+
         if (password) {
-            entry.encryptedPassword = encrypt(password);
+            entry.encryptedPassword = encryptVault(password, userDek);
         }
 
         await entry.save();
 
         const responseEntry = entry.toObject();
-        responseEntry.password = password || decrypt(entry.encryptedPassword);
+        responseEntry.password = password || decryptVault(entry.encryptedPassword, userDek);
         delete responseEntry.encryptedPassword;
+
+        if (userDek) destroyDEK(userDek);
 
         res.status(200).json({ success: true, data: responseEntry });
     } catch (error) {

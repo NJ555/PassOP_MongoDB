@@ -1,6 +1,10 @@
 import jwt from 'jsonwebtoken';
 import { validationResult } from 'express-validator';
 import User from '../models/User.js';
+import { generateUserDEK } from '../utils/encryption.js';
+
+// Helper: artificial delay to slow down brute force (Progressive Backoff)
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─── Helper: Create & Send JWT via HTTP-only Cookie ───────────────────────────
 const sendTokenResponse = (user, statusCode, res) => {
@@ -51,8 +55,11 @@ export const signup = async (req, res, next) => {
             });
         }
 
+        // Generate the Data Encryption Key (DEK) for the new user
+        const { storedDek } = generateUserDEK();
+
         // Create user — password is hashed by the pre-save hook in User model
-        const user = await User.create({ name, email, password });
+        const user = await User.create({ name, email, password, encryptedDek: storedDek });
         sendTokenResponse(user, 201, res);
     } catch (error) {
         next(error); // Forward to global error handler
@@ -72,21 +79,51 @@ export const login = async (req, res, next) => {
 
         const { email, password } = req.body;
 
-        // Fetch user including password (select: false requires explicit inclusion)
-        const user = await User.findOne({ email }).select('+password');
+        // Fetch user including password and lockout fields
+        const user = await User.findOne({ email }).select('+password +loginAttempts +lockUntil');
 
         if (!user) {
-            // Use a generic message — don't reveal whether the email exists
+            // Delay to prevent timing attacks where invalid users return faster
+            await delay(1000);
             return res
                 .status(401)
                 .json({ success: false, message: 'Invalid email or password.' });
         }
 
+        // Check if the user is currently locked out
+        if (user.isTemporarilyLocked()) {
+            const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / 60000);
+            return res.status(429).json({
+                success: false,
+                message: `Account temporarily locked due to multiple failed attempts. Try again in ${minutesLeft} minutes.`,
+            });
+        }
+
+        // Progressive Backoff: Delay response if there are already multiple failed attempts
+        if (user.loginAttempts >= 5) {
+            await delay(2000); // 2 second penalty
+        }
+
         const isMatch = await user.comparePassword(password);
         if (!isMatch) {
+            user.loginAttempts += 1;
+            
+            // Trigger temporary lockout on 10th failure
+            if (user.loginAttempts >= 10) {
+                user.lockUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+            }
+            await user.save();
+
             return res
                 .status(401)
                 .json({ success: false, message: 'Invalid email or password.' });
+        }
+
+        // Successful login: reset attempts and lockout
+        if (user.loginAttempts > 0) {
+            user.loginAttempts = 0;
+            user.lockUntil = undefined;
+            await user.save();
         }
 
         sendTokenResponse(user, 200, res);

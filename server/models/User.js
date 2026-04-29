@@ -26,6 +26,19 @@ const UserSchema = new mongoose.Schema(
             minlength: [8, 'Password must be at least 8 characters'],
             select: false, // Never return password in query results by default
         },
+        encryptedDek: {
+            type: String,
+            // We make this optional initially to allow migration of old users, 
+            // but in a strict new system it would be required.
+        },
+        loginAttempts: {
+            type: Number,
+            required: true,
+            default: 0,
+        },
+        lockUntil: {
+            type: Date,
+        },
     },
     { timestamps: true }
 );
@@ -44,6 +57,11 @@ UserSchema.pre('save', async function (next) {
 // Compare a plain-text candidate password against the stored hashed password
 UserSchema.methods.comparePassword = async function (candidatePassword) {
     return await bcrypt.compare(candidatePassword, this.password);
+};
+
+// Check if the account is currently locked due to too many failed attempts
+UserSchema.methods.isTemporarilyLocked = function () {
+    return !!(this.lockUntil && this.lockUntil > Date.now());
 };
 
 const User = mongoose.model('User', UserSchema);
